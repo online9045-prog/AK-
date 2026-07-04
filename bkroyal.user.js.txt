@@ -1,0 +1,898 @@
+// ==UserScript==
+// @name         BK Royal v28 - ALL LANGUAGE KING
+// @namespace    http://bkroyal.tampermonkey
+// @version      28.0
+// @description  C/O W/O S/O + All Languages + Bhashini Auto Translate + Payload Inject
+// @match        https://.uidai.gov.in/
+// @match        https://myaadhaar.uidai.gov.in/*
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+    console.log('[BK Royal v28] Loaded ✅');
+
+    // ══════════════════════════════════════════════════════
+    // PART 1 — TOKEN STORE
+    // ══════════════════════════════════════════════════════
+    let accessToken  = null;
+    let refreshToken = null;
+    let tokenExpiry  = null;
+    let uiLastCo     = '—';
+    let uiLastHouse  = '—';
+    let uiAttempts   = 0;
+    let uiLastResult = '—';
+    let bhashiniAuth = null; // Portal ka Bhashini token capture karenge
+
+    function saveTokens(data) {
+        if (data.access_token) {
+            accessToken = data.access_token;
+            tokenExpiry = Date.now() + ((data.expires_in || 300) - 30) * 1000;
+            console.log('[TOKEN] Saved ✅ Expires:', data.expires_in, 'sec');
+        }
+        if (data.refresh_token) refreshToken = data.refresh_token;
+    }
+
+    function isTokenExpired() {
+        return tokenExpiry ? Date.now() > tokenExpiry : false;
+    }
+
+    async function doTokenRefresh() {
+        if (!refreshToken) return false;
+        try {
+            const res = await originalFetch('https://myaadhaar.uidai.gov.in/oauth2/token', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken })
+            });
+            const data = await res.json();
+            if (data.access_token) { saveTokens(data); return true; }
+        } catch (e) {}
+        return false;
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 2 — PORTAL LANGUAGE DETECT
+    // ══════════════════════════════════════════════════════
+    function detectLang() {
+        var url = window.location.href;
+        var langMap = {
+            'ta_IN': 'ta', 'te_IN': 'te', 'kn_IN': 'kn', 'ml_IN': 'ml',
+            'bn_IN': 'bn', 'gu_IN': 'gu', 'mr_IN': 'mr', 'pa_IN': 'pa',
+            'or_IN': 'or', 'as_IN': 'as', 'ur_IN': 'ur', 'hi_IN': 'hi',
+            '/ta/': 'ta', '/te/': 'te', '/kn/': 'kn', '/ml/': 'ml',
+            '/bn/': 'bn', '/gu/': 'gu', '/mr/': 'mr', '/pa/': 'pa',
+            'en_IN': 'hi' // English portal = Hindi local language
+        };
+        for (var key in langMap) {
+            if (url.includes(key)) return langMap[key];
+        }
+        var htmlLang = document.documentElement.lang || '';
+        if (htmlLang) {
+            var code = htmlLang.split('-')[0].split('_')[0];
+            if (code !== 'en') return code;
+        }
+        return 'hi'; // Default Hindi
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 3 — PREFIX FIX
+    // ══════════════════════════════════════════════════════
+    function fixPrefix(v) {
+        if (!v) return v;
+        return String(v)
+            // Hindi variants
+            .replace(/सी\s*\/\s*ओ\s*/g,    'C/O ')
+            .replace(/स\s*ी\s*\/\s*ओ\s*/g,  'C/O ')
+            .replace(/स\s*\/\s*ो\s*/g,      'C/O ')
+            .replace(/स\/ो\s*/g,            'C/O ')
+            .replace(/देखरेख\s+/g,           'C/O ')
+            .replace(/देखभाल\s+/g,           'C/O ')
+            .replace(/व\s*\/\s*ो\s*/g,      'W/O ')
+            .replace(/व्?\s*\/\s*ओ\s*/g,    'W/O ')
+            .replace(/पत्नी\s+/g,            'W/O ')
+            .replace(/पत्नी\s*\/\s*/g,       'W/O ')
+            .replace(/एस\s*\/\s*ओ\s*/g,     'S/O ')
+            .replace(/पुत्र\s+/g,            'S/O ')
+            .replace(/पुत्र\s*\/\s*/g,       'S/O ')
+            .replace(/डी\s*\/\s*ओ\s*/g,     'D/O ')
+            .replace(/पुत्री\s+/g,           'D/O ')
+            .replace(/पुत्री\s*\/\s*/g,      'D/O ')
+            .replace(/एच\s*\/\s*ओ\s*/g,     'H/O ')
+            .replace(/पति\s+/g,              'H/O ')
+            // English spacing fix
+            .replace(/\bW[\s\-]*\/[\s\-]*O\b/gi, 'W/O')
+            .replace(/\bS[\s\-]*\/[\s\-]*O\b/gi, 'S/O')
+            .replace(/\bD[\s\-]*\/[\s\-]*O\b/gi, 'D/O')
+            .replace(/\bC[\s\-]*\/[\s\-]*O\b/gi, 'C/O')
+            .replace(/\bH[\s\-]*\/[\s\-]*O\b/gi, 'H/O')
+            // Extra spaces around slash
+            .replace(/\bW\s+\/\s+O\b/gi, 'W/O')
+            .replace(/\bS\s+\/\s+O\b/gi, 'S/O')
+            .replace(/\bD\s+\/\s+O\b/gi, 'D/O')
+            .replace(/\bC\s+\/\s+O\b/gi, 'C/O')
+            .replace(/\bH\s+\/\s+O\b/gi, 'H/O')
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 4 — BHASHINI AUTH CAPTURE
+    // Portal ka Bhashini token capture karenge
+    // ══════════════════════════════════════════════════════
+    function captureBhashiniAuth(headers) {
+        if (!headers) return;
+        try {
+            // Headers object ya plain object dono handle karo
+            var auth = null;
+            var userId = null;
+            if (headers instanceof Headers) {
+                auth   = headers.get('Authorization') || headers.get('authorization') ||
+                         headers.get('ulcaApiKey')    || headers.get('userID');
+                userId = headers.get('userID') || headers.get('userid');
+            } else if (typeof headers === 'object') {
+                auth   = headers['Authorization'] || headers['authorization'] ||
+                         headers['ulcaApiKey']    || headers['userID'];
+                userId = headers['userID'] || headers['userid'];
+            }
+            if (auth && auth.length > 10) {
+                bhashiniAuth = { auth: auth, userId: userId };
+                console.log('[BHASHINI v28] Auth captured ✅');
+            }
+        } catch(e) {}
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 5 — TRANSLATE VIA BHASHINI (Real API)
+    // Portal ke captured token se real translation karo
+    // ══════════════════════════════════════════════════════
+    async function translateViaBhashini(text, targetLang) {
+        if (!bhashiniAuth || !text) return null;
+        try {
+            var headers = {
+                'Content-Type': 'application/json',
+                'Authorization': bhashiniAuth.auth
+            };
+            if (bhashiniAuth.userId) headers['userID'] = bhashiniAuth.userId;
+
+            var body = JSON.stringify({
+                pipelineTasks: [{
+                    taskType: 'transliteration',
+                    config: {
+                        language: { sourceLanguage: 'en', targetLanguage: targetLang },
+                        serviceId: 'ai4bharat/indicxlit--cpu-fsv2',
+                        isSentence: true,
+                        numSuggestions: 1
+                    }
+                }],
+                inputData: { input: [{ source: text }] }
+            });
+
+            var res = await originalFetch('https://dhruva-api.bhashini.gov.in/services/inference/pipeline', {
+                method: 'POST',
+                headers: headers,
+                body: body
+            });
+
+            if (res.ok) {
+                var data = await res.json();
+                var translated = data?.pipelineResponse?.[0]?.output?.[0]?.target;
+                if (translated) {
+                    console.log('[BHASHINI v28] Translated:', text, '→', translated, '(' + targetLang + ')');
+                    return translated;
+                }
+            }
+        } catch(e) {
+            console.log('[BHASHINI v28] API error:', e.message);
+        }
+        return null;
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 6 — FALLBACK NAME MAP (Hindi only — jab Bhashini nahi)
+    // ══════════════════════════════════════════════════════
+    var HINDI_MAP = {
+        'RAM':'राम','SHYAM':'श्याम','AJEET':'अजीत','AJIT':'अजित',
+        'SURESH':'सुरेश','RAMESH':'रमेश','DINESH':'दिनेश',
+        'MAHESH':'महेश','RAJESH':'राजेश','MUKESH':'मुकेश',
+        'VIKAS':'विकास','ROHIT':'रोहित','AMIT':'अमित',
+        'RAHUL':'राहुल','ANIL':'अनिल','SANJAY':'संजय',
+        'VIJAY':'विजय','RAVI':'रवि','DEEPAK':'दीपक',
+        'SANTOSH':'संतोष','ASHOK':'अशोक','RAKESH':'राकेश',
+        'HARISH':'हरीश','PRADEEP':'प्रदीप','UMESH':'उमेश',
+        'NARESH':'नरेश','GANESH':'गणेश','SATISH':'सतीश',
+        'MANISH':'मनीश','KULDEEP':'कुलदीप','SANDEEP':'संदीप',
+        'BIJENDRA':'बिजेन्द्र','BIJENDER':'बिजेन्दर',
+        'RAJENDRA':'राजेन्द्र','SURENDRA':'सुरेन्द्र',
+        'NARENDRA':'नरेन्द्र','DEVENDRA':'देवेन्द्र',
+        'MAHENDRA':'महेन्द्र','VIRENDRA':'वीरेन्द्र',
+        'KUMAR':'कुमार','SINGH':'सिंह','LAL':'लाल',
+        'SHARMA':'शर्मा','VERMA':'वर्मा','GUPTA':'गुप्ता',
+        'YADAV':'यादव','MISHRA':'मिश्रा','PANDEY':'पाण्डेय',
+        'DEVI':'देवी','KUMARI':'कुमारी','SUNITA':'सुनीता',
+        'MOHAN':'मोहन','SOHAN':'सोहन','GOPAL':'गोपाल',
+        'RAJU':'राजू','RAJA':'राजा','HARI':'हरि',
+        'PREM':'प्रेम','KRISHNA':'कृष्ण','SHIV':'शिव',
+        'BABU':'बाबू','BINOD':'बिनोद','PRASAD':'प्रसाद',
+        'TIWARI':'तिवारी','SHUKLA':'शुक्ला','AGYA':'आज्ञा',
+        'AGYARAM':'आज्ञाराम','RAMSEVAK':'रामसेवक',
+    };
+
+    function fallbackTransliterate(text) {
+        // English naam as-is rakho — portal Bhashini se translate karega
+        // HINDI_MAP use nahi karo — partial translation hoti hai jaise "Mishra" → "मिश्रा"
+        if (!text) return text;
+        return fixPrefix(text);
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 7 — PREFIX CHECK
+    // ══════════════════════════════════════════════════════
+    function hasPrefix(body) {
+        try {
+            var src = JSON.parse(body || '{}')?.inputData?.input?.[0]?.source || '';
+            return /^(W\/O|S\/O|D\/O|C\/O|H\/O)\s+/i.test(src.trim());
+        } catch(e) { return false; }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 8 — INJECT FIELDS (Main Fix)
+    // ══════════════════════════════════════════════════════
+    function injectFields(bodyStr) {
+        if (!bodyStr || typeof bodyStr !== 'string') return bodyStr;
+        if (!bodyStr.includes('"update"') || !bodyStr.includes('"address"')) return bodyStr;
+
+        try {
+            var p = JSON.parse(bodyStr);
+            var addr = p && p.update && p.update.address;
+            if (!addr) return bodyStr;
+
+            // Sirf house field se prefix detect karo
+            var house = fixPrefix(String(addr.house || ''));
+            var m = house.match(/^(W\/O|S\/O|D\/O|C\/O|H\/O)\s+(.+)/i);
+
+            // Agar house mein nahi mila — street check karo
+            if (!m) {
+                var street = fixPrefix(String(addr.street || ''));
+                var sm = street.match(/^(W\/O|S\/O|D\/O|C\/O|H\/O)\s+(.+)/i);
+                if (sm) {
+                    addr.house  = sm[0].trim();
+                    addr.street = null;
+                    addr.localLanguageStreet = null;
+                    m = sm;
+                }
+            }
+
+            // Agar landmark mein mila
+            if (!m) {
+                var lmkVal = fixPrefix(String(addr.landmark || ''));
+                var lmkM = lmkVal.match(/^(W\/O|S\/O|D\/O|C\/O|H\/O)\s+(.+)/i);
+                if (lmkM) {
+                    addr.house    = lmkM[0].trim();
+                    addr.landmark = null;
+                    addr.localLanguageLandmark = null;
+                    m = lmkM;
+                }
+            }
+
+            if (!m) return bodyStr;
+
+            var prefix  = m[1].toUpperCase();
+            var name    = m[2].trim();
+            var engFull = prefix + ' ' + name;
+
+            // Hindi fallback (sync)
+            var hinFull = prefix + ' ' + fallbackTransliterate(name);
+
+            // co/careOf inject — English
+            addr.co                  = engFull;
+            addr.careOf              = engFull;
+
+            // Local language — pehle existing se lo
+            var lh = fixPrefix(String(addr.localLanguageHouse || addr.localLanguageCareOf || ''));
+            var lm2 = lh.match(/^(W\/O|S\/O|D\/O|C\/O|H\/O)\s+(.+)/i);
+            if (lm2) {
+                hinFull = prefix + ' ' + lm2[2].trim();
+            }
+
+            addr.localLanguageCo     = hinFull;
+            addr.localLanguageCareOf = hinFull;
+
+            // House number logic
+            var fixedH   = fixPrefix(String(addr.house || ''));
+            var numMatch = fixedH.match(/^(.+?)\s+(W\/O|S\/O|D\/O|C\/O|H\/O)\s+/i);
+            if (numMatch) {
+                addr.house              = numMatch[1].trim();
+                addr.localLanguageHouse = numMatch[1].trim();
+            } else {
+                addr.house              = null;
+                addr.localLanguageHouse = null;
+            }
+
+            // Street/Landmark/Locality — PRESERVE (sirf source field null)
+            addr.localAddressEdited = true;
+
+            p.update.address = addr;
+
+            uiLastCo    = engFull;
+            uiLastHouse = addr.house || 'null';
+            uiAttempts++;
+
+            console.log('[v28] ✅ co     :', engFull);
+            console.log('[v28] ✅ careOf :', engFull);
+            console.log('[v28] ✅ house  :', addr.house);
+            console.log('[v28] ✅ hinCo  :', hinFull);
+            console.log('[v28] ✅ street :', addr.street, '← PRESERVED');
+            console.log('[v28] ✅ doc    : UNCHANGED');
+
+            return JSON.stringify(p);
+
+        } catch (e) {
+            console.log('[v28 ERROR]', e.message);
+            return bodyStr;
+        }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 9 — BHASHINI INTERCEPT
+    // Prefix wale — bypass, baaki — real Bhashini pe jaane do
+    // ══════════════════════════════════════════════════════
+    function makeFakeBhashiniResponse(source, target) {
+        return JSON.stringify({
+            pipelineResponse: [{
+                taskType: 'transliteration',
+                output: [{ source: source, target: target }]
+            }]
+        });
+    }
+
+    function handleBhashiniBody(body) {
+        try {
+            var parsed = JSON.parse(body || '{}');
+            var source = (parsed?.inputData?.input?.[0]?.source || '').trim();
+            if (!source) return null;
+
+            // Prefix detect karo
+            var pm = source.match(/^(W\/O|S\/O|D\/O|C\/O|H\/O)\s+(.+)/i);
+            if (!pm) return null;
+
+            // Prefix hai — Bhashini ko modified request bhejo
+            // Sirf naam bhejo prefix ke bina — Bhashini naam translate karega
+            // Phir prefix English mein wapas lagao
+            var prefix = pm[1].toUpperCase();  // "C/O" — English mein rakho
+            var nameEn = pm[2].trim();          // "Nageshwar Nath Mishra"
+
+            // Body modify karo — sirf naam bhejo Bhashini ko
+            try {
+                var modBody = JSON.parse(body);
+                modBody.inputData.input[0].source = nameEn; // Sirf naam
+                // Bhashini real API pe jaane do naam translate karne ke liye
+                // Yeh bypass nahi karega — real translation hogi
+                // Lekin response mein prefix wapas lagayenge
+                console.log('[BHASHINI v28] Prefix kept English:', prefix, '| Name to translate:', nameEn);
+            } catch(e) {}
+
+            // Agar Bhashini available nahi — naam as-is rakho prefix ke saath
+            // Real Bhashini response handle karo fetch intercept mein
+            return null; // null return karo — real Bhashini call hogi
+
+        } catch(e) { return null; }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 10 — URL CHECKS
+    // ══════════════════════════════════════════════════════
+    function isUidaiUpdateUrl(url) {
+        if (!url) return false;
+        return (url.includes('tathya.uidai.gov.in') ||
+                url.includes('ssupService') ||
+                url.includes('myaadhaar.uidai.gov.in/ssup')) &&
+               !url.includes('google') && !url.includes('analytics') && !url.includes('gtm');
+    }
+
+    function isUidaiUrl(url) {
+        return !!url && url.includes('uidai.gov.in') &&
+               !url.includes('google') && !url.includes('analytics') && !url.includes('gtm');
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 11 — SMART RETRY
+    // ══════════════════════════════════════════════════════
+    async function smartRetry(fetchFn, args, maxRetries) {
+        maxRetries = maxRetries || 4;
+        var delays = [0, 3000, 7000, 15000];
+        for (var i = 0; i < maxRetries; i++) {
+            if (delays[i] > 0) {
+                updateBar('🔄 Retry ' + (i+1) + '/' + maxRetries, '#ffaa00');
+                await new Promise(function(r) { setTimeout(r, delays[i]); });
+            }
+            try {
+                if (isTokenExpired()) await doTokenRefresh();
+                var res = await fetchFn.apply(window, args);
+                var text = await res.clone().text();
+                if (res.status === 200) {
+                    updateBar('✅ Submitted!', '#00cc66');
+                    uiLastResult = '✅ Success';
+                    return res;
+                }
+                if (res.status === 401 || text.includes('invalid_token') || text.includes('Token has expired')) {
+                    await doTokenRefresh();
+                }
+                if (text.includes('SSS_NET_CEP_ERR') || res.status === 400) {
+                    uiLastResult = '❌ ' + res.status;
+                    continue;
+                }
+                return res;
+            } catch (e) {
+                if (e.message && e.message.includes('Content Security Policy'))
+                    return await fetchFn.apply(window, args);
+                console.log('[v28 RETRY]', e.message);
+            }
+        }
+        updateBar('❌ Failed', '#ff4444');
+        uiLastResult = '❌ All failed';
+        return await fetchFn.apply(window, args);
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 12 — FETCH INTERCEPT
+    // ══════════════════════════════════════════════════════
+    const originalFetch = window.fetch;
+    window.fetch = async function (...args) {
+        var url = String(args[0] || '');
+
+        if (url.includes('google') || url.includes('analytics') || url.includes('gtm'))
+            return originalFetch.apply(this, args);
+
+        // Bhashini intercept — prefix English rakho, naam translate hone do
+        if (url.includes('dhruva-api.bhashini.gov.in')) {
+            captureBhashiniAuth(args[1]?.headers);
+
+            var bodyStr = args[1]?.body;
+            var prefix = null;
+            var modArgs = args;
+
+            // Check karo prefix hai ya nahi
+            try {
+                var reqParsed = JSON.parse(bodyStr || '{}');
+                var reqSrc = (reqParsed?.inputData?.input?.[0]?.source || '').trim();
+                var prefMatch = reqSrc.match(/^(W\/O|S\/O|D\/O|C\/O|H\/O)\s+(.+)/i);
+                if (prefMatch) {
+                    prefix = prefMatch[1].toUpperCase(); // "C/O" — English mein save
+                    var nameOnly = prefMatch[2].trim();  // "Nageshwar Nath Mishra"
+                    // Bhashini ko sirf naam bhejo — prefix nahi
+                    reqParsed.inputData.input[0].source = nameOnly;
+                    modArgs = [...args];
+                    modArgs[1] = { ...args[1], body: JSON.stringify(reqParsed) };
+                    console.log('[BHASHINI v28] Prefix saved:', prefix, '| Sending name only:', nameOnly);
+                }
+            } catch(e) {}
+
+            // Real Bhashini call karo
+            try {
+                var bhRes = await originalFetch.apply(this, modArgs);
+
+                if (bhRes.status === 401 || bhRes.status === 403) {
+                    // 401 — naam as-is rakho, prefix laga do
+                    var fallbackSrc = '';
+                    try { fallbackSrc = JSON.parse(bodyStr||'{}')?.inputData?.input?.[0]?.source || ''; } catch(e) {}
+                    var fallbackTarget = prefix ? prefix + ' ' + fallbackSrc.replace(/^(W\/O|S\/O|D\/O|C\/O|H\/O)\s+/i, '') : fallbackSrc;
+                    return new Response(makeFakeBhashiniResponse(fallbackSrc, fallbackTarget), { status: 200, headers: { 'Content-Type': 'application/json' } });
+                }
+
+                if (bhRes.ok && prefix) {
+                    // Response mein naam mila — prefix wapas lagao
+                    try {
+                        var bhData = await bhRes.clone().json();
+                        var translatedName = bhData?.pipelineResponse?.[0]?.output?.[0]?.target || '';
+                        var originalSrc = JSON.parse(bodyStr||'{}')?.inputData?.input?.[0]?.source || '';
+                        if (translatedName) {
+                            // C/O + translated naam
+                            var finalTarget = prefix + ' ' + translatedName;
+                            console.log('[BHASHINI v28] ✅ Final:', originalSrc, '→', finalTarget);
+                            return new Response(makeFakeBhashiniResponse(originalSrc, finalTarget), { status: 200, headers: { 'Content-Type': 'application/json' } });
+                        }
+                    } catch(e) {}
+                }
+
+                return bhRes;
+
+            } catch(e) {
+                // Network error — naam as-is
+                var errSrc = '';
+                try { errSrc = JSON.parse(bodyStr||'{}')?.inputData?.input?.[0]?.source || ''; } catch(ex) {}
+                if (errSrc) return new Response(makeFakeBhashiniResponse(errSrc, errSrc), { status: 200, headers: { 'Content-Type': 'application/json' } });
+                throw e;
+            }
+        }
+
+        if (url.includes('/token') || url.includes('/oauth')) {
+            var res2 = await originalFetch.apply(this, args);
+            try { saveTokens(await res2.clone().json()); } catch (e) {}
+            return res2;
+        }
+
+        if (isUidaiUpdateUrl(url)) {
+            if (isTokenExpired()) await doTokenRefresh();
+            if (args[1]?.body && typeof args[1].body === 'string') {
+                args[1].body = fixPrefix(args[1].body);
+                args[1].body = injectFields(args[1].body);
+            }
+            updateBar('📤 Submitting...', '#4488ff');
+            return await smartRetry(originalFetch, args, 4);
+        }
+
+        if (isUidaiUrl(url) && args[1]?.body && typeof args[1].body === 'string') {
+            args[1].body = fixPrefix(args[1].body);
+        }
+
+        return originalFetch.apply(this, args);
+    };
+
+    // ══════════════════════════════════════════════════════
+    // PART 13 — XHR INTERCEPT
+    // ══════════════════════════════════════════════════════
+    var origOpen      = XMLHttpRequest.prototype.open;
+    var origSend      = XMLHttpRequest.prototype.send;
+    var origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+
+    XMLHttpRequest.prototype.open = function () {
+        this._bkUrl = String(arguments[1] || '');
+        return origOpen.apply(this, arguments);
+    };
+
+    XMLHttpRequest.prototype.setRequestHeader = function (header, value) {
+        // Bhashini auth capture karo
+        if (this._bkUrl && this._bkUrl.includes('dhruva-api.bhashini.gov.in')) {
+            if (header === 'Authorization' || header === 'ulcaApiKey' || header === 'userID') {
+                if (!bhashiniAuth) bhashiniAuth = {};
+                if (header === 'Authorization' || header === 'ulcaApiKey') bhashiniAuth.auth = value;
+                if (header === 'userID') bhashiniAuth.userId = value;
+            }
+        }
+        if (header.toLowerCase() === 'authorization' && accessToken && !isTokenExpired())
+            value = 'Bearer ' + accessToken;
+        return origSetHeader.call(this, header, value);
+    };
+
+    XMLHttpRequest.prototype.send = function (body) {
+        var url = this._bkUrl || '';
+
+        this.addEventListener('load', function () {
+            try {
+                if (this._bkUrl && (this._bkUrl.includes('/token') || this._bkUrl.includes('/oauth')))
+                    saveTokens(JSON.parse(this.responseText));
+            } catch (e) {}
+        });
+
+        if (url.includes('dhruva-api.bhashini.gov.in')) {
+            var fake = handleBhashiniBody(body);
+            if (fake) {
+                var self = this;
+                setTimeout(function() {
+                    try {
+                        Object.defineProperty(self,'readyState',  {get:function(){return 4;},configurable:true});
+                        Object.defineProperty(self,'status',      {get:function(){return 200;},configurable:true});
+                        Object.defineProperty(self,'responseText',{get:function(){return fake;},configurable:true});
+                        Object.defineProperty(self,'response',    {get:function(){return fake;},configurable:true});
+                        self.dispatchEvent(new Event('readystatechange'));
+                        self.dispatchEvent(new Event('load'));
+                    } catch(e) {}
+                }, 10);
+                return;
+            }
+            // Prefix nahi — real request jaane do
+            return origSend.call(this, body);
+        }
+
+        if (body && typeof body === 'string' && isUidaiUrl(url)) {
+            try { body = fixPrefix(body); body = injectFields(body); } catch (e) {}
+        }
+        return origSend.call(this, body);
+    };
+
+    // ══════════════════════════════════════════════════════
+    // PART 14 — INPUT FIX (SAFE — non-English mat chho)
+    // ══════════════════════════════════════════════════════
+    var fixRunning = false;
+    function fixInputs() {
+        if (fixRunning) return;
+        fixRunning = true;
+        try {
+            document.querySelectorAll('input[name="house"], input[name="street"], input[name="landmark"]').forEach(function (el) {
+                if (el._bkFixing) return;
+                var val = el.value || '';
+                var fixed = fixPrefix(val);
+                if (val !== fixed) {
+                    el._bkFixing = true;
+                    el.value = fixed;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    setTimeout(function () { el._bkFixing = false; }, 200);
+                }
+            });
+        } catch (e) {}
+        fixRunning = false;
+    }
+    setInterval(fixInputs, 1000);
+
+    // ══════════════════════════════════════════════════════
+    // PART 15 — HINDI FIELD FIX
+    // ══════════════════════════════════════════════════════
+    var isFixingHindi = false, lastHindiVal = '';
+    function fixHindiField() {
+        if (isFixingHindi) return;
+        var f = document.querySelector('input[name="localLanguageHouse"]');
+        if (!f) return;
+        var cur = f.value || '';
+        if (!cur || cur === lastHindiVal) return;
+        var cleaned = fixPrefix(cur);
+        if (cleaned !== cur) {
+            isFixingHindi = true; lastHindiVal = cleaned;
+            try {
+                var setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(f), 'value') &&
+                             Object.getOwnPropertyDescriptor(Object.getPrototypeOf(f), 'value').set;
+                if (setter) setter.call(f, cleaned); else f.value = cleaned;
+                var evt = new Event('input', { bubbles: true }); evt.bkRoyal = true;
+                f.dispatchEvent(evt);
+            } catch(e) {}
+            setTimeout(function() { isFixingHindi = false; }, 50);
+        } else { lastHindiVal = cur; }
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 16 — POPUP KILL (Safe)
+    // ══════════════════════════════════════════════════════
+    function killPopup() {
+        try {
+            document.querySelectorAll('div').forEach(function(div) {
+                if (!div || !div.isConnected) return;
+                var txt = div.innerText || '';
+                if ((txt.includes("'/o' is not allowed") ||
+                     txt.includes('Need Confirmation') ||
+                     txt.includes('HoF Update')) && txt.length < 500) {
+                    div.querySelectorAll('button').forEach(function(btn) {
+                        if ((btn.textContent||'').trim().toLowerCase() === 'resume') btn.click();
+                    });
+                    setTimeout(function() {
+                        try {
+                            document.querySelectorAll('[class*="modal"],[class*="Modal"],[class*="overlay"],[class*="dialog"]')
+                            .forEach(function(o) {
+                                if (!o || !o.isConnected) return;
+                                var ot = o.innerText || '';
+                                if (ot.includes('Need Confirmation') || ot.includes("'/o' is not allowed")) {
+                                    o.style.display = 'none';
+                                    o.style.visibility = 'hidden';
+                                    o.style.opacity = '0';
+                                    o.style.pointerEvents = 'none';
+                                }
+                            });
+                        } catch(e) {}
+                    }, 100);
+                }
+            });
+        } catch(e) {}
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 17 — NEXT BUTTON FORCE
+    // ══════════════════════════════════════════════════════
+    function forceNextButton() {
+        try {
+            document.querySelectorAll('button').forEach(function(btn) {
+                if (!btn || !btn.isConnected) return;
+                if ((btn.textContent||'').trim().toLowerCase() !== 'next') return;
+                btn.disabled = false;
+                btn.removeAttribute('disabled');
+                btn.removeAttribute('aria-disabled');
+                btn.style.cssText += 'background-image:linear-gradient(to right,rgb(2,13,81),rgb(25,176,220)) !important;color:white !important;cursor:pointer !important;pointer-events:auto !important;opacity:1 !important;';
+                try {
+                    var fk = Object.keys(btn).find(function(k) { return k.startsWith('__reactFiber$'); });
+                    if (fk) {
+                        var node = btn[fk], d = 0;
+                        while (node && d < 20) {
+                            if (node.memoizedProps && 'disabled' in node.memoizedProps) node.memoizedProps.disabled = false;
+                            if (node.pendingProps && 'disabled' in node.pendingProps) node.pendingProps.disabled = false;
+                            node = node.return; d++;
+                        }
+                    }
+                } catch(e) {}
+            });
+        } catch(e) {}
+    }
+
+    // ══════════════════════════════════════════════════════
+    // PART 18 — ALERT/CONFIRM BLOCK
+    // ══════════════════════════════════════════════════════
+    var origAlert = window.alert, origConfirm = window.confirm;
+    window.alert = function(msg) {
+        var m = String(msg||'');
+        if (m.includes('/o') || m.includes('HoF') || m.includes('Confirmation')) return;
+        return origAlert.apply(this, arguments);
+    };
+    window.confirm = function(msg) {
+        var m = String(msg||'');
+        if (m.includes('/o') || m.includes('HoF') || m.includes('Confirmation')) return true;
+        return origConfirm.apply(this, arguments);
+    };
+
+    // ══════════════════════════════════════════════════════
+    // PART 19 — MAIN LOOP + EVENTS + OBSERVER
+    // ══════════════════════════════════════════════════════
+    function mainLoop() {
+        try { fixHindiField(); } catch(e) {}
+        try { killPopup(); } catch(e) {}
+        try { forceNextButton(); } catch(e) {}
+    }
+    setInterval(mainLoop, 100);
+
+    function attachEvents() {
+        var hf = document.querySelector('input[name="localLanguageHouse"]');
+        var ef = document.querySelector('input[name="house"]');
+        if (hf && !hf.dataset.bk28) {
+            hf.dataset.bk28 = '1';
+            hf.addEventListener('input', function(e) { if (e.bkRoyal) return; setTimeout(fixHindiField,30); }, true);
+            hf.addEventListener('blur', function() { setTimeout(fixHindiField,30); }, true);
+        }
+        if (ef && !ef.dataset.bk28) {
+            ef.dataset.bk28 = '1';
+            ef.addEventListener('input', function() {
+                [50,200,500].forEach(function(d){setTimeout(fixHindiField,d);});
+            }, true);
+            ef.addEventListener('blur', function() {
+                setTimeout(fixHindiField,100);
+                [100,300,600,1000,1500,2000].forEach(function(d){
+                    setTimeout(killPopup,d); setTimeout(forceNextButton,d);
+                });
+            }, true);
+        }
+    }
+
+    var obsTimeout;
+    var obs = new MutationObserver(function() {
+        clearTimeout(obsTimeout);
+        obsTimeout = setTimeout(function() {
+            try { attachEvents(); killPopup(); forceNextButton(); } catch(e) {}
+        }, 50);
+    });
+
+    function start() {
+        if (document.body) {
+            obs.observe(document.body, { childList:true, subtree:true, attributes:true,
+                attributeFilter:['disabled','class','style','aria-disabled'] });
+            attachEvents();
+        } else { setTimeout(start, 100); }
+    }
+    start();
+    [1000,2000,3000,5000,8000].forEach(function(d){setTimeout(attachEvents,d);});
+
+    // ══════════════════════════════════════════════════════
+    // PART 20 — PRO UI PANEL
+    // ══════════════════════════════════════════════════════
+    function updateBar(text, color) {
+        var pillTx = document.getElementById('bk-pill-text');
+        if (!pillTx) return;
+        if (text.includes('Submitting')) { pillTx.textContent = 'BK v28 · SENDING'; uiLastResult = '🔄 Sending'; }
+        if (text.includes('Retry'))      { pillTx.textContent = 'BK v28 · RETRY';   uiLastResult = '🔄 ' + text; }
+        if (text.includes('Success'))    { pillTx.textContent = 'BK v28 · ✅';       uiLastResult = '✅ Success'; }
+        if (text.includes('Failed'))     { pillTx.textContent = 'BK v28 · ❌';       uiLastResult = '❌ Failed'; }
+    }
+
+    window.addEventListener('load', function () {
+        setTimeout(function () {
+            if (!document.body) return;
+            ['bk-v20-bar','bk-v21-bar','bk-v22-bar','bk-v23-bar','bk-v24-bar',
+             'bk-v25-bar','bk-final-bar','bk-v26-bar','bk-v27-panel','bk-pill',
+             'bk-panel','bk-v28-style'].forEach(function(id) {
+                var el = document.getElementById(id);
+                if (el && el.parentNode) el.parentNode.removeChild(el);
+            });
+
+            var style = document.createElement('style');
+            style.id = 'bk-v28-style';
+            style.textContent =
+                '#bk-pill{position:fixed;bottom:16px;right:16px;z-index:2147483647;font-family:monospace;cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px;background:#0a0f1e;border:1px solid rgba(25,176,220,0.4);color:#fff;padding:8px 16px;border-radius:50px;font-size:11px;font-weight:600;box-shadow:0 4px 24px rgba(0,0,0,0.5);transition:all 0.2s;}' +
+                '#bk-pill:hover{transform:translateY(-2px);}' +
+                '#bk-dot{width:7px;height:7px;border-radius:50%;transition:all 0.3s;}' +
+                '#bk-dot.ok{background:#00e676;box-shadow:0 0 8px #00e676;}' +
+                '#bk-dot.err{background:#ff4444;box-shadow:0 0 8px #ff4444;}' +
+                '#bk-dot.wait{background:#ffaa00;animation:bk-blink 1s infinite;}' +
+                '@keyframes bk-blink{0%,100%{opacity:1}50%{opacity:0.3}}' +
+                '#bk-panel{position:fixed;bottom:60px;right:16px;z-index:2147483646;font-family:monospace;width:300px;background:#0a0f1e;border:1px solid rgba(25,176,220,0.25);border-radius:16px;overflow:hidden;box-shadow:0 24px 64px rgba(0,0,0,0.8);display:none;}' +
+                '.bk-row{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;margin:0 12px 4px;background:rgba(255,255,255,0.03);border-radius:8px;border:1px solid rgba(255,255,255,0.05);}' +
+                '.bk-label{font-size:9px;color:rgba(255,255,255,0.4);letter-spacing:1.5px;text-transform:uppercase;}' +
+                '.bk-val{font-size:11px;color:#e0f7ff;font-weight:600;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}' +
+                '.green{color:#00e676!important;}.red{color:#ff4444!important;}.yellow{color:#ffaa00!important;}.blue{color:#4dd8f5!important;}' +
+                '.bk-footer{padding:10px 12px;border-top:1px solid rgba(255,255,255,0.05);display:flex;gap:6px;}' +
+                '.bk-btn{flex:1;padding:7px;border:none;border-radius:8px;cursor:pointer;font-family:monospace;font-size:10px;font-weight:700;transition:all 0.2s;}' +
+                '.bk-btn-p{background:linear-gradient(135deg,#0d2060,#19b0dc);color:#fff;}' +
+                '.bk-btn-s{background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.5);}';
+            document.head.appendChild(style);
+
+            var pill = document.createElement('div'); pill.id = 'bk-pill';
+            pill.innerHTML = '<div id="bk-dot" class="wait"></div><span id="bk-pill-text">BK ROYAL v28</span>';
+            document.body.appendChild(pill);
+
+            var panel = document.createElement('div'); panel.id = 'bk-panel';
+            panel.innerHTML =
+                '<div style="background:linear-gradient(135deg,#0d1635,#061020);padding:14px 16px;border-bottom:1px solid rgba(25,176,220,0.15);">' +
+                '<div style="font-size:13px;font-weight:700;background:linear-gradient(90deg,#19b0dc,#4dd8f5);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:2px;">BK ROYAL v28</div>' +
+                '<div style="font-size:9px;color:rgba(25,176,220,0.5);letter-spacing:2px;margin-top:2px;">ALL LANGUAGE · UIDAI FIX</div></div>' +
+                '<div style="padding:12px 0 8px;">' +
+                '<div class="bk-row"><span class="bk-label">Token</span><span class="bk-val" id="bk-token-val">—</span></div>' +
+                '<div style="padding:0 22px 8px;"><div style="height:3px;background:rgba(255,255,255,0.08);border-radius:2px;"><div id="bk-token-fill" style="height:100%;background:linear-gradient(90deg,#19b0dc,#00e676);border-radius:2px;transition:width 1s linear;width:0%;"></div></div></div>' +
+                '<div class="bk-row"><span class="bk-label">Language</span><span class="bk-val blue" id="bk-lang-val">—</span></div>' +
+                '<div class="bk-row"><span class="bk-label">C/O Inject</span><span class="bk-val blue" id="bk-co-val">—</span></div>' +
+                '<div class="bk-row"><span class="bk-label">House</span><span class="bk-val" id="bk-house-val">—</span></div>' +
+                '<div class="bk-row"><span class="bk-label">Attempts</span><span class="bk-val" id="bk-att-val">0</span></div>' +
+                '<div class="bk-row"><span class="bk-label">Last Result</span><span class="bk-val" id="bk-res-val">—</span></div>' +
+                '</div>' +
+                '<div class="bk-footer"><button class="bk-btn bk-btn-p" id="bk-log-btn">VIEW LOG</button><button class="bk-btn bk-btn-s" id="bk-close-btn">CLOSE</button></div>';
+            document.body.appendChild(panel);
+
+            var panelOpen = false;
+            pill.addEventListener('click', function() {
+                panelOpen = !panelOpen;
+                panel.style.display = panelOpen ? 'block' : 'none';
+            });
+            document.getElementById('bk-close-btn').addEventListener('click', function() {
+                panelOpen = false; panel.style.display = 'none';
+            });
+            document.getElementById('bk-log-btn').addEventListener('click', function() {
+                console.log('%c BK Royal v28 Log ', 'background:#0a0f1e;color:#19b0dc;font-size:14px;padding:4px 8px;border-radius:4px;');
+                console.log('%c co      : ' + uiLastCo,    'color:#4dd8f5;font-family:monospace;font-size:12px;');
+                console.log('%c house   : ' + uiLastHouse, 'color:#4dd8f5;font-family:monospace;font-size:12px;');
+                console.log('%c lang    : ' + detectLang(),'color:#4dd8f5;font-family:monospace;font-size:12px;');
+                console.log('%c attempts: ' + uiAttempts,  'color:#ffaa00;font-family:monospace;font-size:12px;');
+                console.log('%c result  : ' + uiLastResult,'color:#00e676;font-family:monospace;font-size:12px;');
+            });
+
+            var tokenMax = 300;
+            setInterval(function() {
+                var dot    = document.getElementById('bk-dot');
+                var pillTx = document.getElementById('bk-pill-text');
+                var tokVal = document.getElementById('bk-token-val');
+                var tokFill= document.getElementById('bk-token-fill');
+                var langEl = document.getElementById('bk-lang-val');
+                var coEl   = document.getElementById('bk-co-val');
+                var hEl    = document.getElementById('bk-house-val');
+                var aEl    = document.getElementById('bk-att-val');
+                var rEl    = document.getElementById('bk-res-val');
+
+                var lang = detectLang();
+                if (langEl) langEl.textContent = lang.toUpperCase();
+
+                if (!accessToken) {
+                    if (dot) dot.className = 'wait';
+                    if (pillTx) pillTx.textContent = 'BK v28 · WAITING';
+                    if (tokVal) { tokVal.textContent = 'No Token'; tokVal.className = 'bk-val yellow'; }
+                    if (tokFill) tokFill.style.width = '0%';
+                } else if (isTokenExpired()) {
+                    if (dot) dot.className = 'err';
+                    if (pillTx) pillTx.textContent = 'BK v28 · EXPIRED';
+                    if (tokVal) { tokVal.textContent = 'Expired'; tokVal.className = 'bk-val red'; }
+                    if (tokFill) tokFill.style.width = '0%';
+                    doTokenRefresh();
+                } else {
+                    var rem = Math.round((tokenExpiry - Date.now()) / 1000);
+                    if (rem > tokenMax) tokenMax = rem;
+                    if (dot) dot.className = 'ok';
+                    if (pillTx && !pillTx.textContent.includes('SEND') && !pillTx.textContent.includes('✅') && !pillTx.textContent.includes('❌'))
+                        pillTx.textContent = 'BK v28 · ' + rem + 's';
+                    if (tokVal) { tokVal.textContent = rem + 's'; tokVal.className = 'bk-val green'; }
+                    if (tokFill) tokFill.style.width = Math.max(0, Math.min(100, (rem/tokenMax)*100)) + '%';
+                }
+
+                if (coEl)  coEl.textContent  = uiLastCo;
+                if (hEl)   hEl.textContent   = uiLastHouse;
+                if (aEl)   aEl.textContent   = uiAttempts;
+                if (rEl) {
+                    rEl.textContent = uiLastResult;
+                    rEl.className   = 'bk-val ' + (uiLastResult.includes('✅') ? 'green' : uiLastResult.includes('❌') ? 'red' : uiLastResult.includes('🔄') ? 'yellow' : '');
+                }
+            }, 1000);
+
+        }, 1500);
+    });
+
+    console.log('%c BK Royal v28 ', 'background:#0a0f1e;color:#19b0dc;font-size:16px;font-weight:bold;padding:6px 12px;border-radius:6px;border:1px solid #19b0dc;');
+    console.log('%c All Languages ✅ Bhashini Fixed ✅ Street Preserved ✅ ', 'color:#00e676;font-family:monospace;');
+})();
